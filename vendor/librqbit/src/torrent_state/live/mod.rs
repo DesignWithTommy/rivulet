@@ -483,19 +483,11 @@ impl TorrentStateLive {
         if !self.punch_tried.lock().insert(target) {
             return;
         }
-        // Relays: the PEX source first, then other ut_holepunch peers, 4 at most. Only a
-        // relay connected to the target can forward; one guess missed ~23 of 24 live.
+        // Relay = the PEX source only. Fanning out to 3 more capable peers sent 40k
+        // rendezvous for 0 extra acks (11 before, 11 after): they are not connected to
+        // the target.
         let src = self.pex_source.lock().get(&target).copied();
-        let mut relays: Vec<PeerHandle> = src.into_iter().collect();
-        for e in self.peers.states.iter() {
-            if relays.len() >= 4 {
-                break;
-            }
-            if Some(*e.key()) != src && e.value().get_live().is_some_and(|l| l.holepunch) {
-                relays.push(*e.key());
-            }
-        }
-        for relay in relays {
+        if let Some(relay) = src {
             let sent = self.peers.with_live(relay, |live| {
                 live.holepunch
                     && live
