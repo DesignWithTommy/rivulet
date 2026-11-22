@@ -141,8 +141,7 @@ impl eframe::App for App {
                         .unwrap_or((0.0, 0));
                     let hp = h.live().map(|l| l.punch_counts()).unwrap_or_default();
                     if let Ok(p) = std::env::var("RIVULET_STATS") {
-                        let _ = std::fs::write(p, format!("peers {} punch {:?} bytes {}
-",
+                        let _ = std::fs::write(p, format!("peers {} punch {:?} bytes {}\n",
                             s.live.as_ref().map(|l| l.snapshot.peer_stats.live).unwrap_or(0), hp, s.progress_bytes));
                     }
                     let name = h.name().unwrap_or_else(|| "(fetching metadata)".into());
@@ -232,9 +231,16 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Rivulet",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([720.0, 420.0]).with_drag_and_drop(true),
+            viewport: egui::ViewportBuilder::default().with_inner_size([720.0, 420.0]).with_drag_and_drop(true).with_icon(icon()),
             ..Default::default()
         },
         Box::new(|_| Ok(Box::new(app))),
     )
+}
+
+/// window/taskbar icon, same art as the exe resource
+fn icon() -> egui::IconData {
+    let img = image::load_from_memory(include_bytes!("../assets/rivulet.png")).expect("icon").into_rgba8();
+    let (width, height) = img.dimensions();
+    egui::IconData { rgba: img.into_raw(), width, height }
 }

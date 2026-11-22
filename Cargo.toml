@@ -1,12 +1,15 @@
 [package]
 name = "rivulet"
 description = "Lightweight unaffiliated torrent downloader written in Rust"
+license = "Apache-2.0"
+repository = "https://github.com/DesignWithTommy/rivulet"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
 eframe = "0.37.0"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 librqbit = "9.1.0"
 reqwest = "0.13"
 rfd = "0.18.0"
@@ -18,3 +21,6 @@ librqbit = { path = "vendor/librqbit" }
 librqbit-peer-protocol = { path = "vendor/librqbit-peer-protocol" }
 librqbit-tracker-comms = { path = "vendor/librqbit-tracker-comms" }
 librqbit-dht = { path = "vendor/librqbit-dht" }
+
+[build-dependencies]
+winresource = "0.1.34"
