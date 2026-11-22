@@ -162,7 +162,7 @@ fn main() -> eframe::Result<()> {
     let opts = librqbit::SessionOptions {
         // default is no listener: no incoming peers at all
         listen: Some(librqbit::ListenerOptions {
-            mode: librqbit::ListenerMode::TcpOnly, // uTP pulls ringbuf 0.4.8 (RUSTSEC-2026-0293)
+            mode: librqbit::ListenerMode::TcpAndUtp, // TCP-only dropped the swarm to 0 peers
             listen_addr: (std::net::Ipv6Addr::UNSPECIFIED, 6881).into(),
             enable_upnp_port_forwarding: false, // never open router ports
             ..Default::default()
