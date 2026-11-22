@@ -1,48 +1,133 @@
-use anyhow::{Context, Result, bail};
-use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, Session};
-use std::{path::PathBuf, time::Duration};
+#![windows_subsystem = "windows"]
+use anyhow::{Result, bail};
+use eframe::egui;
+use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session};
+use std::{path::PathBuf, sync::{Arc, Mutex}};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        bail!("usage: torrent-dl <file.torrent|magnet:...|http url> [out_dir]");
+type Handle = Arc<ManagedTorrent>;
+
+struct App {
+    rt: tokio::runtime::Runtime,
+    session: Arc<Session>,
+    input: String,
+    out_dir: String,
+    torrents: Arc<Mutex<Vec<Handle>>>,
+    status: Arc<Mutex<String>>,
+}
+
+fn default_dir() -> String {
+    std::env::var("USERPROFILE").map(|h| format!("{h}\\Downloads")).unwrap_or_else(|_| ".".into())
+}
+
+impl App {
+    fn add(&self, src: String) {
+        let (session, list, status, out) =
+            (self.session.clone(), self.torrents.clone(), self.status.clone(), self.out_dir.clone());
+        *status.lock().unwrap() = "adding...".into();
+        self.rt.spawn(async move {
+            let r: Result<Handle> = async {
+                let add = if src.starts_with("magnet:") || src.starts_with("http") {
+                    AddTorrent::from_url(src)
+                } else {
+                    AddTorrent::from_bytes(std::fs::read(&src)?)
+                };
+                let opts = AddTorrentOptions { overwrite: true, output_folder: Some(out), ..Default::default() };
+                match session.add_torrent(add, Some(opts)).await? {
+                    AddTorrentResponse::Added(_, h) | AddTorrentResponse::AlreadyManaged(_, h) => Ok(h),
+                    AddTorrentResponse::ListOnly(_) => bail!("list only"),
+                }
+            }
+            .await;
+            match r {
+                Ok(h) => {
+                    let mut l = list.lock().unwrap();
+                    if !l.iter().any(|x| Arc::ptr_eq(x, &h)) { l.push(h); }
+                    *status.lock().unwrap() = String::new();
+                }
+                Err(e) => *status.lock().unwrap() = format!("error: {e:#}"),
+            }
+        });
     }
-    let src = &args[1];
-    let out = PathBuf::from(args.get(2).map(String::as_str).unwrap_or("."));
-    std::fs::create_dir_all(&out)?;
+}
 
-    let add = if src.starts_with("magnet:") || src.starts_with("http") {
-        AddTorrent::from_url(src.clone())
-    } else {
-        AddTorrent::from_bytes(std::fs::read(src).with_context(|| format!("read {src}"))?)
+impl eframe::App for App {
+    fn ui(&mut self, root: &mut egui::Ui, _: &mut eframe::Frame) {
+        let ctx = root.ctx().clone();
+        // drag and drop .torrent files
+        let dropped: Vec<_> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        for p in dropped { self.add(p.display().to_string()); }
+
+        egui::CentralPanel::default().show(root, |ui| {
+            ui.heading("torrent-dl");
+            ui.horizontal(|ui| {
+                ui.label("Magnet / URL:");
+                ui.add(egui::TextEdit::singleline(&mut self.input).desired_width(ui.available_width() - 60.0));
+                if ui.button("Add").clicked() && !self.input.trim().is_empty() {
+                    let s = self.input.trim().to_string();
+                    self.input.clear();
+                    self.add(s);
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Open .torrent file...").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("torrent", &["torrent"]).pick_file() {
+                        self.add(p.display().to_string());
+                    }
+                }
+                ui.label("Save to:");
+                ui.label(&self.out_dir);
+                if ui.button("Change...").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().set_directory(&self.out_dir).pick_folder() {
+                        self.out_dir = p.display().to_string();
+                    }
+                }
+                if ui.button("Open folder").clicked() {
+                    let _ = std::process::Command::new("explorer").arg(&self.out_dir).spawn();
+                }
+            });
+            let st = self.status.lock().unwrap().clone();
+            if !st.is_empty() { ui.colored_label(egui::Color32::YELLOW, st); }
+            ui.label("Tip: drag .torrent files onto this window.");
+            ui.separator();
+
+            let list = self.torrents.lock().unwrap().clone();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for h in list {
+                    let s = h.stats();
+                    let frac = if s.total_bytes > 0 { s.progress_bytes as f32 / s.total_bytes as f32 } else { 0.0 };
+                    let (speed, peers) = s.live.as_ref()
+                        .map(|l| (l.download_speed.mbps, l.snapshot.peer_stats.live))
+                        .unwrap_or((0.0, 0));
+                    let name = h.name().unwrap_or_else(|| "(fetching metadata)".into());
+                    ui.label(egui::RichText::new(name).strong());
+                    let text = if s.finished { "done".to_string() } else {
+                        format!("{:.1}%  {:.1}/{:.1} MiB  {speed:.2} MiB/s  peers {peers}",
+                            frac * 100.0, s.progress_bytes as f64 / 1048576.0, s.total_bytes as f64 / 1048576.0)
+                    };
+                    ui.add(egui::ProgressBar::new(frac).text(text));
+                    ui.add_space(6.0);
+                }
+            });
+        });
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+    }
+}
+
+fn main() -> eframe::Result<()> {
+    let rt = tokio::runtime::Runtime::new().expect("tokio");
+    let out_dir = default_dir();
+    let session = rt.block_on(Session::new(PathBuf::from(&out_dir))).expect("session");
+    let app = App {
+        rt, session, input: String::new(), out_dir,
+        torrents: Default::default(), status: Default::default(),
     };
-
-    let session = Session::new(out.clone()).await?;
-    let handle = match session
-        .add_torrent(add, Some(AddTorrentOptions { overwrite: true, ..Default::default() }))
-        .await?
-    {
-        AddTorrentResponse::Added(_, h) | AddTorrentResponse::AlreadyManaged(_, h) => h,
-        AddTorrentResponse::ListOnly(_) => bail!("list only"),
-    };
-
-    let h2 = handle.clone();
-    let progress = tokio::spawn(async move {
-        loop {
-            let s = h2.stats();
-            let pct = if s.total_bytes > 0 { s.progress_bytes as f64 * 100.0 / s.total_bytes as f64 } else { 0.0 };
-            let (speed, peers) = s.live.as_ref()
-                .map(|l| (l.download_speed.mbps, l.snapshot.peer_stats.live))
-                .unwrap_or((0.0, 0));
-            eprint!("\r{pct:6.2}%  {:.1}/{:.1} MiB  {speed:.2} MiB/s  peers {peers}   ",
-                s.progress_bytes as f64 / 1048576.0, s.total_bytes as f64 / 1048576.0);
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    });
-
-    handle.wait_until_completed().await?;
-    progress.abort();
-    eprintln!("\ndone -> {}", out.display());
-    Ok(())
+    if let Some(arg) = std::env::args().nth(1) { app.add(arg); } // "Open with" / file association
+    eframe::run_native(
+        "torrent-dl",
+        eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default().with_inner_size([720.0, 420.0]).with_drag_and_drop(true),
+            ..Default::default()
+        },
+        Box::new(|_| Ok(Box::new(app))),
+    )
 }
