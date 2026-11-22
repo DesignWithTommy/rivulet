@@ -86,6 +86,12 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self) {
+        // pause + flush so the next start resumes instead of re-checking
+        let s = self.session.clone();
+        self.rt.block_on(async move { s.stop().await });
+    }
+
     fn ui(&mut self, root: &mut egui::Ui, _: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
         // drag and drop .torrent files
@@ -135,7 +141,10 @@ impl eframe::App for App {
                         .unwrap_or((0.0, 0));
                     let name = h.name().unwrap_or_else(|| "(fetching metadata)".into());
                     ui.label(egui::RichText::new(name).strong());
-                    let text = if s.finished { "done".to_string() } else {
+                    let checking = matches!(s.state, librqbit::TorrentStatsState::Initializing { .. });
+                    let text = if s.finished { "done".to_string() } else if checking {
+                        format!("checking existing files {:.1}% (peers connect after this)", frac * 100.0)
+                    } else {
                         format!("{:.1}%  {:.1}/{:.1} MiB  {speed:.2} MiB/s  peers {peers}",
                             frac * 100.0, s.progress_bytes as f64 / 1048576.0, s.total_bytes as f64 / 1048576.0)
                     };
