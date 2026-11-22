@@ -40,6 +40,7 @@ impl App {
         *status.lock().unwrap() = "adding...".into();
         self.rt.spawn(async move {
             let r: Result<Handle> = async {
+                let dir: String;
                 let add = if src.starts_with("magnet:") || src.starts_with("http") {
                     AddTorrent::from_url(src)
                 } else {
@@ -55,10 +56,17 @@ impl App {
                             if fd.attrs().symlink { bail!("refused: torrent contains a symlink"); }
                             for c in fd.filename.to_vec() { check_component(&c)?; }
                         }
+                        // every torrent gets its own folder under the save dir
+                        let name = r.info.name().map(|n| n.into_owned()).unwrap_or_else(|| r.info_hash.as_string());
+                        let name: String = name.chars()
+                            .map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { '_' } else { c })
+                            .collect::<String>().trim_end_matches(['.', ' ']).to_string();
+                        let name = if check_component(&name).is_ok() { name } else { r.info_hash.as_string() };
+                        dir = std::path::Path::new(&out).join(name).display().to_string();
                         r.torrent_bytes
                     }
                 };
-                let opts = AddTorrentOptions { overwrite: true, output_folder: Some(out), ..Default::default() };
+                let opts = AddTorrentOptions { overwrite: true, output_folder: Some(dir), ..Default::default() };
                 match session.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await? {
                     AddTorrentResponse::Added(_, h) | AddTorrentResponse::AlreadyManaged(_, h) => Ok(h),
                     AddTorrentResponse::ListOnly(_) => bail!("list only"),
