@@ -280,6 +280,9 @@ pub(crate) struct LivePeerState {
     pub tx: PeerTx,
 
     pub connection_kind: ConnectionKind,
+
+    // Rivulet: we are choking this peer (task_choker)
+    pub am_choking: bool,
 }
 
 impl LivePeerState {
@@ -298,6 +301,7 @@ impl LivePeerState {
             inflight_requests: Default::default(),
             late_cancelled_request_tolerance: 0,
             request_slots_changed: Default::default(),
+            am_choking: false,
             tx,
             connection_kind,
         }

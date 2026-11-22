@@ -180,6 +180,8 @@ pub enum AddIncomingPeerResult {
 
 pub struct TorrentStateLive {
     peers: PeerStates,
+    // Rivulet: copies of each piece among live peers, refreshed every 2 s (task_availability)
+    availability: std::sync::RwLock<Vec<u32>>,
     pub(crate) shared: Arc<ManagedTorrentShared>,
     metadata: Arc<TorrentMetadata>,
     _locked: RwLock<TorrentStateLocked>,
@@ -268,6 +270,7 @@ impl TorrentStateLive {
         let state = Arc::new(TorrentStateLive {
             shared: paused.shared.clone(),
             metadata: paused.metadata.clone(),
+            availability: Default::default(),
             peers: PeerStates {
                 session_stats: session_stats.peers.clone(),
                 stats: Default::default(),
@@ -345,6 +348,16 @@ impl TorrentStateLive {
             debug_span!(parent: state.shared.span.clone(), "upload_scheduler"),
             format!("[{}]upload_scheduler", state.shared.id),
             state.clone().task_upload_scheduler(ratelimit_upload_rx),
+        );
+        state.spawn(
+            debug_span!(parent: state.shared.span.clone(), "choker"),
+            format!("[{}]choker", state.shared.id),
+            state.clone().task_choker(),
+        );
+        state.spawn(
+            debug_span!(parent: state.shared.span.clone(), "availability"),
+            format!("[{}]availability", state.shared.id),
+            state.clone().task_availability(),
         );
         Ok(state)
     }
@@ -438,6 +451,87 @@ impl TorrentStateLive {
             ),
         );
         Ok(AddIncomingPeerResult::Added)
+    }
+
+    /// Rivulet patch: reciprocation choker (BitTyrant, Piatek et al. NSDI 2007, simplified).
+    /// Upstream unchokes every peer, spreading upload so thin that tit-for-tat peers
+    /// never rank us. Every 10 s: unchoke the CHOKER_SLOTS interested peers that sent us
+    /// the most in the last window, plus one optimistic slot rotated every 30 s;
+    /// choke the rest. Seeding (finished) = everyone unchoked, as upstream.
+    /// Rivulet: piece availability for rarest-first. Built off the acquire path because
+    /// iterating peers there would deadlock on the peer map.
+    async fn task_availability(self: Arc<Self>) -> crate::Result<()> {
+        let n = self.lengths.total_pieces() as usize;
+        loop {
+            let mut counts = vec![0u32; n];
+            for e in self.peers.states.iter() {
+                if let Some(live) = e.value().get_live() {
+                    for i in live.bitfield.iter_ones() {
+                        if i < n {
+                            counts[i] += 1;
+                        }
+                    }
+                }
+            }
+            *self.availability.write().unwrap() = counts;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+
+    async fn task_choker(self: Arc<Self>) -> crate::Result<()> {
+        const CHOKER_SLOTS: usize = 12;
+        let mut prev: std::collections::HashMap<PeerHandle, u64> = Default::default();
+        let mut optimistic: Option<PeerHandle> = None;
+        let mut tick: u64 = 0;
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            tick += 1;
+            let finished = self.is_finished();
+            let mut ranked: Vec<(PeerHandle, u64)> = Vec::new();
+            let mut now: std::collections::HashMap<PeerHandle, u64> = Default::default();
+            for e in self.peers.states.iter() {
+                let fetched = e.value().stats.counters.fetched_bytes.load(Ordering::Relaxed);
+                now.insert(*e.key(), fetched);
+                if let Some(live) = e.value().get_live()
+                    && live.peer_interested
+                {
+                    let delta = fetched.saturating_sub(*prev.get(e.key()).unwrap_or(&0));
+                    ranked.push((*e.key(), delta));
+                }
+            }
+            prev = now;
+            ranked.sort_by(|a, b| b.1.cmp(&a.1));
+            // PropShare (Levin et al., SIGCOMM 2008): every peer that sent us data last
+            // window keeps a slot (up to 40), not just the top few; at least CHOKER_SLOTS.
+            let contributors = ranked.iter().take_while(|r| r.1 > 0).count().min(40);
+            let mut keep: HashSet<PeerHandle> = ranked
+                .iter()
+                .take(contributors.max(CHOKER_SLOTS))
+                .map(|r| r.0)
+                .collect();
+            if tick % 3 == 1 || optimistic.is_none_or(|o| !prev.contains_key(&o)) {
+                let rest: Vec<PeerHandle> = ranked.iter().skip(contributors.max(CHOKER_SLOTS)).map(|r| r.0).collect();
+                optimistic = if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest[rand::random::<u32>() as usize % rest.len()])
+                };
+            }
+            if let Some(o) = optimistic {
+                keep.insert(o);
+            }
+            for mut e in self.peers.states.iter_mut() {
+                let addr = *e.key();
+                if let Some(live) = e.value_mut().get_live_mut() {
+                    let choke = !finished && live.peer_interested && !keep.contains(&addr);
+                    if choke != live.am_choking {
+                        live.am_choking = choke;
+                        let msg = if choke { Message::Choke } else { Message::Unchoke };
+                        let _ = live.tx.send(WriterRequest::Message(msg));
+                    }
+                }
+            }
+        }
     }
 
     async fn task_upload_scheduler(
@@ -1446,6 +1540,7 @@ impl PeerHandler {
                     ..
                 } = &mut **g;
                 let pieces = pieces.as_mut().ok_or(Error::ChunkTrackerEmpty)?;
+                let avail = self.state.availability.read().unwrap();
                 let result = pieces.acquire_piece(AcquireRequest {
                     peer: self.addr,
                     peer_avg_time: self.counters.average_piece_download_time(),
@@ -1458,6 +1553,7 @@ impl PeerHandler {
                             .try_write()
                             .is_some()
                     },
+                    availability: if avail.is_empty() { None } else { Some(&avail) },
                 });
 
                 match result {
@@ -1486,6 +1582,9 @@ impl PeerHandler {
     }
 
     fn on_download_request(&self, request: Request) -> anyhow::Result<()> {
+        if self.state.peers.with_live(self.addr, |l| l.am_choking).unwrap_or(false) {
+            return Ok(()); // choked by the reciprocation choker
+        }
         if self.state.torrent().options.disable_upload() {
             anyhow::bail!("upload disabled, but peer requested a piece")
         }
