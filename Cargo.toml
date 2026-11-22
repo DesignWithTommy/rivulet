@@ -15,3 +15,4 @@ url = "2.5.9"
 
 [patch.crates-io]
 librqbit = { path = "vendor/librqbit" }
+librqbit-peer-protocol = { path = "vendor/librqbit-peer-protocol" }

@@ -73,6 +73,7 @@ use peer_binary_protocol::{
         self, ExtendedMessage,
         handshake::ExtendedHandshake,
         ut_metadata::{UtMetadata, UtMetadataData},
+        ut_holepunch::{HolepunchType, UtHolepunch},
         ut_pex::UtPex,
     },
 };
@@ -182,6 +183,13 @@ pub struct TorrentStateLive {
     peers: PeerStates,
     // Rivulet: copies of each piece among live peers, refreshed every 2 s (task_availability)
     availability: std::sync::RwLock<Vec<u32>>,
+    // Rivulet BEP 55: who told us each address (PEX), addresses already punched,
+    // and (rendezvous sent, dials on connect, relays done)
+    pex_source: Mutex<std::collections::HashMap<SocketAddr, PeerHandle>>,
+    punch_tried: Mutex<HashSet<SocketAddr>>,
+    // punched before any dial: our NAT is still shut to them, so we must dial on connect
+    punch_proactive: Mutex<HashSet<SocketAddr>>,
+    pub(crate) punch_stats: (AtomicU64, AtomicU64, AtomicU64, AtomicU64, AtomicU64),
     pub(crate) shared: Arc<ManagedTorrentShared>,
     metadata: Arc<TorrentMetadata>,
     _locked: RwLock<TorrentStateLocked>,
@@ -271,6 +279,10 @@ impl TorrentStateLive {
             shared: paused.shared.clone(),
             metadata: paused.metadata.clone(),
             availability: Default::default(),
+            pex_source: Default::default(),
+            punch_tried: Default::default(),
+            punch_proactive: Default::default(),
+            punch_stats: Default::default(),
             peers: PeerStates {
                 session_stats: session_stats.peers.clone(),
                 stats: Default::default(),
@@ -458,6 +470,73 @@ impl TorrentStateLive {
     /// never rank us. Every 10 s: unchoke the CHOKER_SLOTS interested peers that sent us
     /// the most in the last window, plus one optimistic slot rotated every 30 s;
     /// choke the rest. Seeding (finished) = everyone unchoked, as upstream.
+    /// Rivulet: (rendezvous sent, dials on connect, relays done)
+    pub fn punch_counts(&self) -> (u64, u64, u64, u64, u64) {
+        let s = &self.punch_stats;
+        let l = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        (l(&s.0), l(&s.1), l(&s.2), l(&s.3), l(&s.4))
+    }
+
+    /// Rivulet BEP 55: an outgoing connect to `target` failed. Ask the peer that told us
+    /// about it (PEX) to relay a hole-punch, once per address.
+    fn try_holepunch(&self, target: SocketAddr) {
+        if !self.punch_tried.lock().insert(target) {
+            return;
+        }
+        // Relays: the PEX source first, then other ut_holepunch peers, 4 at most. Only a
+        // relay connected to the target can forward; one guess missed ~23 of 24 live.
+        let src = self.pex_source.lock().get(&target).copied();
+        let mut relays: Vec<PeerHandle> = src.into_iter().collect();
+        for e in self.peers.states.iter() {
+            if relays.len() >= 4 {
+                break;
+            }
+            if Some(*e.key()) != src && e.value().get_live().is_some_and(|l| l.holepunch) {
+                relays.push(*e.key());
+            }
+        }
+        for relay in relays {
+            let sent = self.peers.with_live(relay, |live| {
+                live.holepunch
+                    && live
+                        .tx
+                        .send(WriterRequest::Message(Message::Extended(
+                            ExtendedMessage::UtHolepunch(UtHolepunch {
+                                kind: HolepunchType::Rendezvous,
+                                addr: target,
+                                err_code: 0,
+                            }),
+                        )))
+                        .is_ok()
+            });
+            if sent == Some(true) {
+                self.punch_stats.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Rivulet BEP 55: a relay told us `addr` is dialing us now; dial it back at once
+    /// so both NATs open (uTP shares the listen socket, so its SYN carries our port).
+    fn holepunch_dial(&self, addr: SocketAddr) {
+        self.punch_stats.1.fetch_add(1, Ordering::Relaxed);
+        let queue = match self.peers.add_if_not_seen(addr) {
+            Some(_) => true,
+            None => self
+                .peers
+                .with_peer_mut(addr, "holepunch_dial", |p| match p.get_state() {
+                    PeerState::Dead | PeerState::NotNeeded => {
+                        p.set_state(PeerState::Queued, &self.peers);
+                        true
+                    }
+                    _ => false,
+                })
+                .unwrap_or(false),
+        };
+        if queue {
+            let _ = self.peer_queue_tx.send(addr);
+        }
+    }
+
     /// Rivulet: piece availability for rarest-first. Built off the acquire path because
     /// iterating peers there would deadlock on the peer map.
     async fn task_availability(self: Arc<Self>) -> crate::Result<()> {
@@ -1203,6 +1282,7 @@ impl PeerConnectionHandler for &'_ PeerHandler {
                         })?;
                 }
             }
+            Message::Extended(ExtendedMessage::UtHolepunch(h)) => self.on_holepunch(h),
             Message::Extended(ExtendedMessage::UtPex(pex)) => {
                 if self.state.metadata.info.info().private {
                     warn!(
@@ -1259,6 +1339,10 @@ impl PeerConnectionHandler for &'_ PeerHandler {
     }
 
     fn on_extended_handshake(&self, hs: &ExtendedHandshake<ByteBuf>) -> anyhow::Result<()> {
+        let hp = hs.m.ut_holepunch.is_some();
+        self.state
+            .peers
+            .with_live_mut(self.addr, "holepunch support", |live| live.holepunch = hp);
         if let Some(client_name) = hs.v.as_ref().and_then(format_peer_client_name) {
             self.state
                 .peers
@@ -1373,6 +1457,7 @@ impl PeerHandler {
             }
         };
         let prev = pe.value_mut().take_state(peers);
+        let never_connected = matches!(prev, PeerState::Connecting(_));
 
         match prev {
             PeerState::Connecting(_) => {}
@@ -1455,6 +1540,9 @@ impl PeerHandler {
 
         // Prevent deadlocks.
         drop(pe);
+        if never_connected {
+            self.state.try_holepunch(handle);
+        }
 
         if let Some(dur) = backoff {
             if cfg!(feature = "_disable_reconnect_test") {
@@ -2133,7 +2221,88 @@ impl PeerHandler {
         Ok(())
     }
 
+    /// Rivulet BEP 55 message handling: relay rendezvous, dial on connect.
+    fn on_holepunch(&self, h: UtHolepunch) {
+        let reply = |kind, addr, err_code| {
+            let _ = self.tx.send(WriterRequest::Message(Message::Extended(
+                ExtendedMessage::UtHolepunch(UtHolepunch { kind, addr, err_code }),
+            )));
+        };
+        match h.kind {
+            HolepunchType::Rendezvous => {
+                if h.addr == self.addr {
+                    return reply(HolepunchType::Error, h.addr, 4); // NoSelf
+                }
+                let forwarded = self.state.peers.with_live(h.addr, |live| {
+                    if !live.holepunch {
+                        return Err(3u32); // NoSupport
+                    }
+                    let _ = live.tx.send(WriterRequest::Message(Message::Extended(
+                        ExtendedMessage::UtHolepunch(UtHolepunch {
+                            kind: HolepunchType::Connect,
+                            addr: self.addr,
+                            err_code: 0,
+                        }),
+                    )));
+                    Ok(())
+                });
+                match forwarded {
+                    Some(Ok(())) => {
+                        self.state.punch_stats.2.fetch_add(1, Ordering::Relaxed);
+                        reply(HolepunchType::Connect, h.addr, 0)
+                    }
+                    Some(Err(code)) => reply(HolepunchType::Error, h.addr, code),
+                    None => reply(HolepunchType::Error, h.addr, 2), // NotConnected
+                }
+            }
+            // We asked for this punch: our failed dial just opened our NAT to them, so stay
+            // Dead and accept their SYN (dialing too would make both sides reject the
+            // other as AlreadyActive). Asked by someone else: dial.
+            HolepunchType::Connect => {
+                if !self.state.punch_tried.lock().contains(&h.addr)
+                    || self.state.punch_proactive.lock().remove(&h.addr)
+                {
+                    self.state.holepunch_dial(h.addr)
+                } else {
+                    self.state.punch_stats.3.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            HolepunchType::Error => {
+                self.state.punch_stats.4.fetch_add(1, Ordering::Relaxed);
+                debug!(addr = ?h.addr, code = h.err_code, "holepunch: relay error")
+            }
+        }
+    }
+
     fn on_pex_message(&self, msg: UtPex<ByteBuf<'_>>) {
+        {
+            let mut src = self.state.pex_source.lock();
+            for p in msg.added_peers() {
+                src.insert(p.addr, self.addr);
+            }
+        }
+        // BEP 11 flags: 0x08 ut_holepunch, 0x10 reachable. An unreachable punch-capable
+        // peer gets a rendezvous NOW, through this peer while it is surely still
+        // connected to it (stale relays failed ~23 of 24, Halkes & Pouwelse 2011).
+        if self.state.peers.with_live(self.addr, |l| l.holepunch) == Some(true) {
+            for p in msg.added_peers() {
+                if p.flags & 0x08 != 0
+                    && p.flags & 0x10 == 0
+                    && self.state.peers.with_peer(p.addr, |_| ()).is_none()
+                    && self.state.punch_tried.lock().insert(p.addr)
+                {
+                    self.state.punch_proactive.lock().insert(p.addr);
+                    let _ = self.tx.send(WriterRequest::Message(Message::Extended(
+                        ExtendedMessage::UtHolepunch(UtHolepunch {
+                            kind: HolepunchType::Rendezvous,
+                            addr: p.addr,
+                            err_code: 0,
+                        }),
+                    )));
+                    self.state.punch_stats.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
         msg.dropped_peers()
             .chain(msg.added_peers())
             .for_each(|peer| {

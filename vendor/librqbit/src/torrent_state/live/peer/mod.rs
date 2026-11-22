@@ -283,6 +283,8 @@ pub(crate) struct LivePeerState {
 
     // Rivulet: we are choking this peer (task_choker)
     pub am_choking: bool,
+    // Rivulet: peer advertised ut_holepunch (BEP 55)
+    pub holepunch: bool,
 }
 
 impl LivePeerState {
@@ -302,6 +304,7 @@ impl LivePeerState {
             late_cancelled_request_tolerance: 0,
             request_slots_changed: Default::default(),
             am_choking: false,
+            holepunch: false,
             tx,
             connection_kind,
         }

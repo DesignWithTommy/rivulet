@@ -139,14 +139,20 @@ impl eframe::App for App {
                     let (speed, peers) = s.live.as_ref()
                         .map(|l| (l.download_speed.mbps, l.snapshot.peer_stats.live))
                         .unwrap_or((0.0, 0));
+                    let hp = h.live().map(|l| l.punch_counts()).unwrap_or_default();
+                    if let Ok(p) = std::env::var("RIVULET_STATS") {
+                        let _ = std::fs::write(p, format!("peers {} punch {:?} bytes {}
+",
+                            s.live.as_ref().map(|l| l.snapshot.peer_stats.live).unwrap_or(0), hp, s.progress_bytes));
+                    }
                     let name = h.name().unwrap_or_else(|| "(fetching metadata)".into());
                     ui.label(egui::RichText::new(name).strong());
                     let checking = matches!(s.state, librqbit::TorrentStatsState::Initializing { .. });
                     let text = if s.finished { "done".to_string() } else if checking {
                         format!("checking existing files {:.1}% (peers connect after this)", frac * 100.0)
                     } else {
-                        format!("{:.1}%  {:.1}/{:.1} MiB  {speed:.2} MiB/s  peers {peers}",
-                            frac * 100.0, s.progress_bytes as f64 / 1048576.0, s.total_bytes as f64 / 1048576.0)
+                        format!("{:.1}%  {:.1}/{:.1} MiB  {speed:.2} MiB/s  peers {peers}  punch {}/{}/{}/{}/{}",
+                            frac * 100.0, s.progress_bytes as f64 / 1048576.0, s.total_bytes as f64 / 1048576.0, hp.0, hp.1, hp.2, hp.3, hp.4)
                     };
                     ui.add(egui::ProgressBar::new(frac).text(text));
                     ui.add_space(6.0);
