@@ -173,10 +173,19 @@ fn main() -> eframe::Result<()> {
         listen: Some(librqbit::ListenerOptions {
             mode: librqbit::ListenerMode::TcpAndUtp, // TCP-only dropped the swarm to 0 peers
             listen_addr: (std::net::Ipv6Addr::UNSPECIFIED, 6881).into(),
-            enable_upnp_port_forwarding: false, // never open router ports
+            enable_upnp_port_forwarding: true, // incoming peers; operator chose speed over a closed port
             ..Default::default()
         }),
-        peer_limit: Some(400), // default 128
+        peer_limit: Some(800), // default 128
+        // dead peers time out in 3 s (default 10 s), slots refill faster
+        connect: Some(librqbit::ConnectionOptions {
+            enable_tcp: true,
+            peer_opts: Some(librqbit::PeerConnectionOptions {
+                connect_timeout: Some(std::time::Duration::from_secs(3)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
         trackers,
         fastresume: true,
         persistence: Some(librqbit::SessionPersistenceConfig::Json { folder: None }),
