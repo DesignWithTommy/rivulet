@@ -19,6 +19,20 @@ fn default_dir() -> String {
     std::env::var("USERPROFILE").map(|h| format!("{h}\\Downloads")).unwrap_or_else(|_| ".".into())
 }
 
+/// Windows-unsafe names librqbit does not reject: drive/stream colons, reserved devices,
+/// trailing dot/space (aliasing), control chars.
+fn check_component(c: &str) -> Result<()> {
+    let bad = c.is_empty() || c == "." || c == ".."
+        || c.chars().any(|ch| ch.is_control() || "<>:\"/\\|?*".contains(ch))
+        || c.ends_with('.') || c.ends_with(' ');
+    let stem = c.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4
+            && stem.as_bytes()[3].is_ascii_digit());
+    if bad || reserved { bail!("refused: unsafe file name in torrent: {c:?}"); }
+    Ok(())
+}
+
 impl App {
     fn add(&self, src: String) {
         let (session, list, status, out) =
@@ -31,8 +45,21 @@ impl App {
                 } else {
                     AddTorrent::from_bytes(std::fs::read(&src)?)
                 };
+                // pass 1: metadata only, vet every filename before anything touches disk
+                let peek = AddTorrentOptions { list_only: true, output_folder: Some(out.clone()), ..Default::default() };
+                let bytes = match session.add_torrent(add, Some(peek)).await? {
+                    AddTorrentResponse::AlreadyManaged(_, h) => return Ok(h),
+                    AddTorrentResponse::Added(..) => bail!("unexpected add on list_only"),
+                    AddTorrentResponse::ListOnly(r) => {
+                        for fd in r.info.iter_file_details() {
+                            if fd.attrs().symlink { bail!("refused: torrent contains a symlink"); }
+                            for c in fd.filename.to_vec() { check_component(&c)?; }
+                        }
+                        r.torrent_bytes
+                    }
+                };
                 let opts = AddTorrentOptions { overwrite: true, output_folder: Some(out), ..Default::default() };
-                match session.add_torrent(add, Some(opts)).await? {
+                match session.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await? {
                     AddTorrentResponse::Added(_, h) | AddTorrentResponse::AlreadyManaged(_, h) => Ok(h),
                     AddTorrentResponse::ListOnly(_) => bail!("list only"),
                 }
@@ -127,9 +154,9 @@ fn main() -> eframe::Result<()> {
     let opts = librqbit::SessionOptions {
         // default is no listener: no incoming peers at all
         listen: Some(librqbit::ListenerOptions {
-            mode: librqbit::ListenerMode::TcpAndUtp,
+            mode: librqbit::ListenerMode::TcpOnly, // uTP pulls ringbuf 0.4.8 (RUSTSEC-2026-0293)
             listen_addr: (std::net::Ipv6Addr::UNSPECIFIED, 6881).into(),
-            enable_upnp_port_forwarding: true,
+            enable_upnp_port_forwarding: false, // never open router ports
             ..Default::default()
         }),
         peer_limit: Some(400), // default 128
@@ -139,9 +166,11 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     let session = rt.block_on(Session::new_with_opts(PathBuf::from(&out_dir), opts)).expect("session");
+    // persisted torrents resume in the session; show them
+    let restored: Vec<Handle> = session.with_torrents(|it| it.map(|(_, h)| h.clone()).collect());
     let app = App {
         rt, session, input: String::new(), out_dir,
-        torrents: Default::default(), status: Default::default(),
+        torrents: Arc::new(Mutex::new(restored)), status: Default::default(),
     };
     if let Some(arg) = std::env::args().nth(1) { app.add(arg); } // "Open with" / file association
     eframe::run_native(
