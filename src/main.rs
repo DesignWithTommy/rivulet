@@ -160,14 +160,32 @@ impl eframe::App for App {
 fn main() -> eframe::Result<()> {
     let rt = tokio::runtime::Runtime::new().expect("tokio");
     let out_dir = default_dir();
-    let trackers = [
+    // more trackers = more peers: a built-in set plus the live ngosang "best" list (3 s cap)
+    let mut list: Vec<String> = [
         "udp://tracker.opentrackr.org:1337/announce",
         "udp://open.stealth.si:80/announce",
         "udp://tracker.torrent.eu.org:451/announce",
         "udp://exodus.desync.com:6969/announce",
         "udp://open.demonii.com:1337/announce",
-        "udp://tracker.openbittorrent.com:6969/announce",
-    ].iter().filter_map(|t| url::Url::parse(t).ok()).collect();
+        "udp://explodie.org:6969/announce",
+        "udp://tracker.dler.org:6969/announce",
+        "udp://tracker.qu.ax:6969/announce",
+        "udp://tracker.theoks.net:6969/announce",
+        "udp://tracker.tiny-vps.com:6969/announce",
+        "udp://tracker-udp.gbitt.info:80/announce",
+        "udp://opentracker.io:6969/announce",
+        "udp://tracker.0x7c0.com:6969/announce",
+        "udp://tracker.srv00.com:6969/announce",
+        "udp://tracker.bittor.pw:1337/announce",
+        "http://tracker.opentrackr.org:1337/announce",
+    ].iter().map(|s| s.to_string()).collect();
+    list.extend(rt.block_on(async {
+        let c = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build().ok()?;
+        let t = c.get("https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt")
+            .send().await.ok()?.text().await.ok()?;
+        Some(t.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect::<Vec<_>>())
+    }).unwrap_or_default());
+    let trackers = list.iter().filter_map(|t| url::Url::parse(t).ok()).collect();
     let opts = librqbit::SessionOptions {
         // default is no listener: no incoming peers at all
         listen: Some(librqbit::ListenerOptions {
