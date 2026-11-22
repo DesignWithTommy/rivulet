@@ -1,5 +1,6 @@
 [package]
-name = "torrent-dl"
+name = "rivulet"
+description = "Lightweight unaffiliated torrent downloader written in Rust"
 version = "0.1.0"
 edition = "2024"
 

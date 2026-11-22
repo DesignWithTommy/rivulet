@@ -4468,6 +4468,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivulet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "eframe",
+ "librqbit",
+ "rfd",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "rlimit"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5373,18 +5385,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6769c452d71ba30696c6b37770c439a9cc9110f47f7d5cdbeda79840ef5ea31"
 dependencies = [
  "winnow",
-]
-
-[[package]]
-name = "torrent-dl"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "eframe",
- "librqbit",
- "rfd",
- "tokio",
- "url",
 ]
 
 [[package]]

@@ -85,7 +85,7 @@ impl eframe::App for App {
         for p in dropped { self.add(p.display().to_string()); }
 
         egui::CentralPanel::default().show(root, |ui| {
-            ui.heading("torrent-dl");
+            ui.heading("Rivulet");
             ui.horizontal(|ui| {
                 ui.label("Magnet / URL:");
                 ui.add(egui::TextEdit::singleline(&mut self.input).desired_width(ui.available_width() - 60.0));
@@ -174,7 +174,7 @@ fn main() -> eframe::Result<()> {
     };
     if let Some(arg) = std::env::args().nth(1) { app.add(arg); } // "Open with" / file association
     eframe::run_native(
-        "torrent-dl",
+        "Rivulet",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default().with_inner_size([720.0, 420.0]).with_drag_and_drop(true),
             ..Default::default()
