@@ -2,7 +2,7 @@
 
 # Rivulet
 
-Lightweight, unaffiliated torrent downloader for Windows, written in Rust. One small exe, no installer, no ads.
+**Fast, lightweight torrent client for Windows, written in Rust.** Free and open-source BitTorrent downloader for magnet links and `.torrent` files: one portable exe, no installer, no ads, no bundled junk. Unaffiliated with any other client.
 
 **Download:** [rivulet.exe](https://github.com/DesignWithTommy/rivulet/releases/latest)
 
