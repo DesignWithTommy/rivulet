@@ -205,7 +205,7 @@ fn main() -> eframe::Result<()> {
                 .and_then(|m| std::num::NonZeroU32::new(m * 1024 * 1024)),
             download_bps: None,
         },
-        peer_limit: Some(800), // default 128
+        peer_limit: Some(100_000), // no cap in practice (None = librqbit default 128)
         // dead peers time out in 3 s (default 10 s), slots refill faster
         connect: Some(librqbit::ConnectionOptions {
             enable_tcp: true,
