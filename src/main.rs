@@ -182,6 +182,7 @@ fn main() -> eframe::Result<()> {
             enable_tcp: true,
             peer_opts: Some(librqbit::PeerConnectionOptions {
                 connect_timeout: Some(std::time::Duration::from_secs(3)),
+                max_request_window: Some(512), // default 128 x 16 KiB in flight per peer
                 ..Default::default()
             }),
             ..Default::default()
