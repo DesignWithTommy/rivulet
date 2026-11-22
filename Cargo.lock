@@ -5384,6 +5384,7 @@ dependencies = [
  "librqbit",
  "rfd",
  "tokio",
+ "url",
 ]
 
 [[package]]

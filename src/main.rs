@@ -116,7 +116,29 @@ impl eframe::App for App {
 fn main() -> eframe::Result<()> {
     let rt = tokio::runtime::Runtime::new().expect("tokio");
     let out_dir = default_dir();
-    let session = rt.block_on(Session::new(PathBuf::from(&out_dir))).expect("session");
+    let trackers = [
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://open.stealth.si:80/announce",
+        "udp://tracker.torrent.eu.org:451/announce",
+        "udp://exodus.desync.com:6969/announce",
+        "udp://open.demonii.com:1337/announce",
+        "udp://tracker.openbittorrent.com:6969/announce",
+    ].iter().filter_map(|t| url::Url::parse(t).ok()).collect();
+    let opts = librqbit::SessionOptions {
+        // default is no listener: no incoming peers at all
+        listen: Some(librqbit::ListenerOptions {
+            mode: librqbit::ListenerMode::TcpAndUtp,
+            listen_addr: (std::net::Ipv6Addr::UNSPECIFIED, 6881).into(),
+            enable_upnp_port_forwarding: true,
+            ..Default::default()
+        }),
+        peer_limit: Some(400), // default 128
+        trackers,
+        fastresume: true,
+        persistence: Some(librqbit::SessionPersistenceConfig::Json { folder: None }),
+        ..Default::default()
+    };
+    let session = rt.block_on(Session::new_with_opts(PathBuf::from(&out_dir), opts)).expect("session");
     let app = App {
         rt, session, input: String::new(), out_dir,
         torrents: Default::default(), status: Default::default(),
