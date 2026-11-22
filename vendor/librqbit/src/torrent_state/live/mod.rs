@@ -189,6 +189,8 @@ pub struct TorrentStateLive {
     punch_tried: Mutex<HashSet<SocketAddr>>,
     // punched before any dial: our NAT is still shut to them, so we must dial on connect
     punch_proactive: Mutex<HashSet<SocketAddr>>,
+    // DCUtR timing (IMC 2026, arXiv 2604.12484): when each rendezvous left, so the relay ack gives RTT
+    punch_sent: Mutex<std::collections::HashMap<SocketAddr, std::time::Instant>>,
     pub(crate) punch_stats: (AtomicU64, AtomicU64, AtomicU64, AtomicU64, AtomicU64),
     pub(crate) shared: Arc<ManagedTorrentShared>,
     metadata: Arc<TorrentMetadata>,
@@ -282,6 +284,7 @@ impl TorrentStateLive {
             pex_source: Default::default(),
             punch_tried: Default::default(),
             punch_proactive: Default::default(),
+            punch_sent: Default::default(),
             punch_stats: Default::default(),
             peers: PeerStates {
                 session_stats: session_stats.peers.clone(),
@@ -503,6 +506,7 @@ impl TorrentStateLive {
             });
             if sent == Some(true) {
                 self.punch_stats.0.fetch_add(1, Ordering::Relaxed);
+                self.punch_sent.lock().insert(target, std::time::Instant::now());
             }
         }
     }
@@ -2247,9 +2251,8 @@ impl PeerHandler {
                     None => reply(HolepunchType::Error, h.addr, 2), // NotConnected
                 }
             }
-            // We asked for this punch: our failed dial just opened our NAT to them, so stay
-            // Dead and accept their SYN (dialing too would make both sides reject the
-            // other as AlreadyActive). Asked by someone else: dial.
+            // Asked by someone else: dial now. We asked: dial after RTT/2 (DCUtR), a live
+            // peer by then is skipped by holepunch_dial.
             HolepunchType::Connect => {
                 if !self.state.punch_tried.lock().contains(&h.addr)
                     || self.state.punch_proactive.lock().remove(&h.addr)
@@ -2257,6 +2260,14 @@ impl PeerHandler {
                     self.state.holepunch_dial(h.addr)
                 } else {
                     self.state.punch_stats.3.fetch_add(1, Ordering::Relaxed);
+                    // DCUtR: both sides dial; the initiator waits RTT/2 to the relay so the SYNs
+                    // cross (TCP source ports are random, so our earlier failed dial opened nothing).
+                    let rtt = self.state.punch_sent.lock().remove(&h.addr).map(|t| t.elapsed());
+                    let (st, addr) = (self.state.clone(), h.addr);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(rtt.unwrap_or_default().min(Duration::from_secs(2)) / 2).await;
+                        st.holepunch_dial(addr);
+                    });
                 }
             }
             HolepunchType::Error => {
