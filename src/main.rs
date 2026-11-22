@@ -200,6 +200,11 @@ fn main() -> eframe::Result<()> {
             enable_upnp_port_forwarding: true, // incoming peers; operator chose speed over a closed port
             ..Default::default()
         }),
+        ratelimits: librqbit::limits::LimitsConfig {
+            upload_bps: std::env::var("RIVULET_UP_MBPS").ok().and_then(|v| v.parse::<u32>().ok())
+                .and_then(|m| std::num::NonZeroU32::new(m * 1024 * 1024)),
+            download_bps: None,
+        },
         peer_limit: Some(800), // default 128
         // dead peers time out in 3 s (default 10 s), slots refill faster
         connect: Some(librqbit::ConnectionOptions {
