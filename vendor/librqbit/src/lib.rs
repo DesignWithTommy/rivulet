@@ -41,6 +41,10 @@ macro_rules! aframe {
 #[macro_use]
 mod stat_gen;
 
+/// Rivulet: BEP 55 hole punching on/off (off by default, toggled from the UI).
+pub static PUNCH_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn punch_on() -> bool { PUNCH_ENABLED.load(std::sync::atomic::Ordering::Relaxed) }
+
 pub mod api;
 mod api_error;
 mod bitv;

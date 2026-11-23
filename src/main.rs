@@ -99,7 +99,13 @@ impl eframe::App for App {
         for p in dropped { self.add(p.display().to_string()); }
 
         egui::CentralPanel::default().show(root, |ui| {
-            ui.heading("Rivulet");
+            ui.horizontal(|ui| {
+                ui.heading("Rivulet");
+                let on = librqbit::PUNCH_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+                if ui.button(if on { "Hole punching: ON" } else { "Hole punching: OFF" }).clicked() {
+                    librqbit::PUNCH_ENABLED.store(!on, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
             ui.horizontal(|ui| {
                 ui.label("Magnet / URL:");
                 ui.add(egui::TextEdit::singleline(&mut self.input).desired_width(ui.available_width() - 60.0));

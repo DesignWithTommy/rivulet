@@ -483,6 +483,9 @@ impl TorrentStateLive {
     /// Rivulet BEP 55: an outgoing connect to `target` failed. Ask the peer that told us
     /// about it (PEX) to relay a hole-punch, once per address.
     fn try_holepunch(&self, target: SocketAddr) {
+        if !crate::punch_on() {
+            return;
+        }
         if !self.punch_tried.lock().insert(target) {
             return;
         }
@@ -2219,6 +2222,9 @@ impl PeerHandler {
 
     /// Rivulet BEP 55 message handling: relay rendezvous, dial on connect.
     fn on_holepunch(&self, h: UtHolepunch) {
+        if !crate::punch_on() {
+            return;
+        }
         let reply = |kind, addr, err_code| {
             let _ = self.tx.send(WriterRequest::Message(Message::Extended(
                 ExtendedMessage::UtHolepunch(UtHolepunch { kind, addr, err_code }),
@@ -2287,7 +2293,7 @@ impl PeerHandler {
         // BEP 11 flags: 0x08 ut_holepunch, 0x10 reachable. An unreachable punch-capable
         // peer gets a rendezvous NOW, through this peer while it is surely still
         // connected to it (stale relays failed ~23 of 24, Halkes & Pouwelse 2011).
-        if self.state.peers.with_live(self.addr, |l| l.holepunch) == Some(true) {
+        if crate::punch_on() && self.state.peers.with_live(self.addr, |l| l.holepunch) == Some(true) {
             for p in msg.added_peers() {
                 if p.flags & 0x08 != 0
                     && p.flags & 0x10 == 0
