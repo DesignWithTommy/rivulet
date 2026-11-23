@@ -34,6 +34,33 @@ fn check_component(c: &str) -> Result<()> {
 }
 
 impl App {
+    /// forget the torrent (files kept, saved progress cleared), re-add: full re-scan of disk,
+    /// then only missing pieces download; extra files in the folder are never touched
+    fn recheck(&self, h: Handle) {
+        let (session, list, status) = (self.session.clone(), self.torrents.clone(), self.status.clone());
+        *status.lock().unwrap() = "rechecking...".into();
+        self.rt.spawn(async move {
+            let r: Result<Handle> = async {
+                let bytes = h.metadata.load_full().map(|m| m.torrent_bytes.clone())
+                    .ok_or_else(|| anyhow::anyhow!("no metadata yet"))?;
+                let dir = h.output_folder().display().to_string();
+                let only_files = h.only_files();
+                session.delete(h.id().into(), false).await?;
+                let opts = AddTorrentOptions { overwrite: true, output_folder: Some(dir), only_files, ..Default::default() };
+                match session.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await? {
+                    AddTorrentResponse::Added(_, n) | AddTorrentResponse::AlreadyManaged(_, n) => Ok(n),
+                    AddTorrentResponse::ListOnly(_) => bail!("list only"),
+                }
+            }.await;
+            let mut l = list.lock().unwrap();
+            l.retain(|x| !Arc::ptr_eq(x, &h));
+            match r {
+                Ok(n) => { l.push(n); *status.lock().unwrap() = String::new(); }
+                Err(e) => *status.lock().unwrap() = format!("recheck error: {e:#}"),
+            }
+        });
+    }
+
     fn add(&self, src: String) {
         let (session, list, status, out) =
             (self.session.clone(), self.torrents.clone(), self.status.clone(), self.out_dir.clone());
@@ -151,7 +178,10 @@ impl eframe::App for App {
                             s.live.as_ref().map(|l| l.snapshot.peer_stats.live).unwrap_or(0), hp, s.progress_bytes));
                     }
                     let name = h.name().unwrap_or_else(|| "(fetching metadata)".into());
-                    ui.label(egui::RichText::new(name).strong());
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(name).strong());
+                        if ui.small_button("Recheck").clicked() { self.recheck(h.clone()); }
+                    });
                     let checking = matches!(s.state, librqbit::TorrentStatsState::Initializing { .. });
                     let text = if s.finished { "done".to_string() } else if checking {
                         format!("checking existing files {:.1}% (peers connect after this)", frac * 100.0)
