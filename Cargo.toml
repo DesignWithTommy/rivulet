@@ -3,7 +3,7 @@ name = "rivulet"
 description = "Lightweight unaffiliated torrent downloader written in Rust"
 license = "Apache-2.0"
 repository = "https://github.com/DesignWithTommy/rivulet"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]

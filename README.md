@@ -14,7 +14,7 @@
 ## What's inside
 Built on a patched [librqbit](https://github.com/ikatson/rqbit) (vendored in `vendor/`), with:
 - PropShare-style choker and rarest-first piece selection
-- BEP 55 hole punching with DCUtR-style RTT-timed dials
+- BEP 55 hole punching with DCUtR-style RTT-timed dials (off by default; toggle with the **Hole punching** button)
 - Parallel file checking, IPv4 + IPv6, TCP + uTP, DHT, PEX, UPnP
 - Filename vetting: Windows-unsafe names and symlinks in a torrent are refused
 
