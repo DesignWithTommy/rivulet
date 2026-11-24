@@ -11,6 +11,7 @@ struct App {
     session: Arc<Session>,
     input: String,
     out_dir: String,
+    only: String,
     torrents: Arc<Mutex<Vec<Handle>>>,
     status: Arc<Mutex<String>>,
 }
@@ -33,18 +34,28 @@ fn check_component(c: &str) -> Result<()> {
     Ok(())
 }
 
+/// "a.dll, b.dll" -> indices of files whose name matches (case-insensitive); None = all
+fn pick(filter: &str, names: impl Iterator<Item = String>) -> Option<Vec<usize>> {
+    let want: Vec<String> = filter.split(',').map(|w| w.trim().to_lowercase()).filter(|w| !w.is_empty()).collect();
+    if want.is_empty() { return None; }
+    Some(names.enumerate().filter(|(_, n)| want.contains(&n.to_lowercase())).map(|(i, _)| i).collect())
+}
+
 impl App {
     /// forget the torrent (files kept, saved progress cleared), re-add: full re-scan of disk,
     /// then only missing pieces download; extra files in the folder are never touched
     fn recheck(&self, h: Handle) {
         let (session, list, status) = (self.session.clone(), self.torrents.clone(), self.status.clone());
+        let filter = self.only.clone();
         *status.lock().unwrap() = "rechecking...".into();
         self.rt.spawn(async move {
             let r: Result<Handle> = async {
                 let bytes = h.metadata.load_full().map(|m| m.torrent_bytes.clone())
                     .ok_or_else(|| anyhow::anyhow!("no metadata yet"))?;
                 let dir = h.output_folder().display().to_string();
-                let only_files = h.only_files();
+                let picked = h.with_metadata(|m| pick(&filter, m.file_infos.iter()
+                    .map(|f| f.relative_filename.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())))?;
+                let only_files = picked.or_else(|| h.only_files());
                 session.delete(h.id().into(), false).await?;
                 let opts = AddTorrentOptions { overwrite: true, output_folder: Some(dir), only_files, ..Default::default() };
                 match session.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await? {
@@ -64,10 +75,12 @@ impl App {
     fn add(&self, src: String) {
         let (session, list, status, out) =
             (self.session.clone(), self.torrents.clone(), self.status.clone(), self.out_dir.clone());
+        let filter = self.only.clone();
         *status.lock().unwrap() = "adding...".into();
         self.rt.spawn(async move {
             let r: Result<Handle> = async {
                 let dir: String;
+                let only_files: Option<Vec<usize>>;
                 let add = if src.starts_with("magnet:") || src.starts_with("http") {
                     AddTorrent::from_url(src)
                 } else {
@@ -83,6 +96,9 @@ impl App {
                             if fd.attrs().symlink { bail!("refused: torrent contains a symlink"); }
                             for c in fd.filename.to_vec() { check_component(&c)?; }
                         }
+                        only_files = pick(&filter, r.info.iter_file_details()
+                            .map(|fd| fd.filename.to_vec().last().cloned().unwrap_or_default()));
+                        if only_files.as_ref().is_some_and(|v| v.is_empty()) { bail!("no files match the Only files list"); }
                         // every torrent gets its own folder under the save dir
                         let name = r.info.name().map(|n| n.into_owned()).unwrap_or_else(|| r.info_hash.as_string());
                         let name: String = name.chars()
@@ -93,7 +109,7 @@ impl App {
                         r.torrent_bytes
                     }
                 };
-                let opts = AddTorrentOptions { overwrite: true, output_folder: Some(dir), ..Default::default() };
+                let opts = AddTorrentOptions { overwrite: true, output_folder: Some(dir), only_files, ..Default::default() };
                 match session.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await? {
                     AddTorrentResponse::Added(_, h) | AddTorrentResponse::AlreadyManaged(_, h) => Ok(h),
                     AddTorrentResponse::ListOnly(_) => bail!("list only"),
@@ -141,6 +157,10 @@ impl eframe::App for App {
                     self.input.clear();
                     self.add(s);
                 }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Only files:");
+                ui.add(egui::TextEdit::singleline(&mut self.only).hint_text("blank = all; e.g. a.dll, b.dll (applies on Add / Recheck)").desired_width(ui.available_width()));
             });
             ui.horizontal(|ui| {
                 if ui.button("Open .torrent file...").clicked() {
@@ -260,7 +280,7 @@ fn main() -> eframe::Result<()> {
     // persisted torrents resume in the session; show them
     let restored: Vec<Handle> = session.with_torrents(|it| it.map(|(_, h)| h.clone()).collect());
     let app = App {
-        rt, session, input: String::new(), out_dir,
+        rt, session, input: String::new(), out_dir, only: String::new(),
         torrents: Arc::new(Mutex::new(restored)), status: Default::default(),
     };
     if let Some(arg) = std::env::args().nth(1) { app.add(arg); } // "Open with" / file association
